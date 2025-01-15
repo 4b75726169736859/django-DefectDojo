@@ -44,14 +44,16 @@ class OSVScannerParser:
                             # Pull the package purl if present
                             if (vulnerabilitypackage := affected[0].get("package", "")) != "":
                                 vulnerabilitypackagepurl = vulnerabilitypackage.get("purl", "")
+                            # Extract the CWE
                             if (cwe := affected[0].get("database_specific", {}).get("cwes", None)) is not None:
                                 cwe = cwe[0]["cweId"]
+                            # Extract fixed version
                             ranges = affected[0].get("ranges", [])
                             for range_item in ranges:
                                 for event in range_item.get("events", []):
                                     if "fixed" in event:
                                         mitigation = f"Upgrade to version: {event['fixed']}"
-
+                    # Create some references
                     reference = ""
                     for ref in vulnerability.get("references", []):
                         reference += ref.get("url") + "\n"
