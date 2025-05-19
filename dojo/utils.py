@@ -25,6 +25,7 @@ from dateutil.relativedelta import MO, SU, relativedelta
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.signals import user_logged_in, user_logged_out, user_login_failed
+from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Case, Count, IntegerField, Q, Sum, Value, When
 from django.db.models.query import QuerySet
@@ -235,10 +236,7 @@ def is_deduplication_on_engagement_mismatch(new_finding, to_duplicate_finding):
 
 
 def get_endpoints_as_url(finding):
-    list1 = []
-    for e in finding.endpoints.all():
-        list1.append(hyperlink.parse(str(e)))
-    return list1
+    return [hyperlink.parse(str(e)) for e in finding.endpoints.all()]
 
 
 def are_urls_equal(url1, url2, fields):
@@ -893,9 +891,7 @@ def get_punchcard_data(objs, start_date, weeks, view="Finding"):
 
 
 def get_week_data(week_start_date, tick, day_counts):
-    data = []
-    for i in range(len(day_counts)):
-        data.append([tick, i, day_counts[i]])
+    data = [[tick, i, day_counts[i]] for i in range(len(day_counts))]
     label = [tick, week_start_date.strftime("<span class='small'>%m/%d<br/>%Y</span>")]
     return data, label
 
@@ -1623,35 +1619,6 @@ def get_celery_worker_status():
         return False
 
 
-def get_work_days(start: date, end: date):
-    """
-    Math function to get workdays between 2 dates.
-    Can be used only as fallback as it doesn't know
-    about specific country holidays or extra working days.
-    https://stackoverflow.com/questions/3615375/number-of-days-between-2-dates-excluding-weekends/71977946#71977946
-    """
-    # if the start date is on a weekend, forward the date to next Monday
-    if start.weekday() > WEEKDAY_FRIDAY:
-        start += timedelta(days=7 - start.weekday())
-
-    # if the end date is on a weekend, rewind the date to the previous Friday
-    if end.weekday() > WEEKDAY_FRIDAY:
-        end -= timedelta(days=end.weekday() - WEEKDAY_FRIDAY)
-
-    if start > end:
-        return 0
-    # that makes the difference easy, no remainders etc
-    diff_days = (end - start).days + 1
-    weeks = int(diff_days / 7)
-
-    remainder = end.weekday() - start.weekday() + 1
-
-    if remainder != 0 and end.weekday() < start.weekday():
-        remainder += 5
-
-    return weeks * 5 + remainder
-
-
 # Used to display the counts and enabled tabs in the product view
 class Product_Tab:
     def __init__(self, product, title=None, tab=None):
@@ -1937,9 +1904,9 @@ def sla_compute_and_notify(*args, **kwargs):
         return title
 
     def _create_notifications():
-        for pt in combined_notifications:
-            for p in combined_notifications[pt]:
-                for kind in combined_notifications[pt][p]:
+        for prodtype, comb_notif_prodtype in combined_notifications.items():
+            for prod, comb_notif_prod in comb_notif_prodtype.items():
+                for kind, comb_notif_kind in comb_notif_prod.items():
                     # creating notifications on per-finding basis
 
                     # we need this list for combined notification feature as we
@@ -1947,7 +1914,7 @@ def sla_compute_and_notify(*args, **kwargs):
                     # create_notification() arguments
                     findings_list = []
 
-                    for n in combined_notifications[pt][p][kind]:
+                    for n in comb_notif_kind:
                         title = _notification_title_for_finding(n.finding, kind, n.finding.sla_days_remaining())
 
                         create_notification(
@@ -1964,8 +1931,8 @@ def sla_compute_and_notify(*args, **kwargs):
                         findings_list.append(n.finding)
 
                     # producing a "combined" SLA breach notification
-                    title_combined = f"SLA alert ({kind}): product type '{pt}', product '{p}'"
-                    product = combined_notifications[pt][p][kind][0].finding.test.engagement.product
+                    title_combined = f"SLA alert ({kind}): product type '{prodtype}', product '{prod}'"
+                    product = comb_notif_kind[0].finding.test.engagement.product
                     create_notification(
                         event="sla_breach_combined",
                         title=title_combined,
@@ -2327,9 +2294,7 @@ def get_file_images(obj, *, return_objects=False):
 def get_enabled_notifications_list():
     # Alerts need to enabled by default
     enabled = ["alert"]
-    for choice in NOTIFICATION_CHOICES:
-        if get_system_setting(f"enable_{choice[0]}_notifications"):
-            enabled.append(choice[0])
+    enabled.extend(choice[0] for choice in NOTIFICATION_CHOICES if get_system_setting(f"enable_{choice[0]}_notifications"))
     return enabled
 
 
@@ -2478,26 +2443,17 @@ def calculate_finding_age(f):
     if start_date and isinstance(start_date, str):
         start_date = parse(start_date).date()
 
-    if settings.SLA_BUSINESS_DAYS:
-        if f.get("mitigated"):
-            mitigated_date = f.get("mitigated")
-            if isinstance(mitigated_date, datetime):
-                mitigated_date = f.get("mitigated").date()
-            days = get_work_days(f.get("date"), mitigated_date)
-        else:
-            days = get_work_days(f.get("date"), timezone.now().date())
-    else:
-        if isinstance(start_date, datetime):
-            start_date = start_date.date()
+    if isinstance(start_date, datetime):
+        start_date = start_date.date()
 
-        if f.get("mitigated"):
-            mitigated_date = f.get("mitigated")
-            if isinstance(mitigated_date, datetime):
-                mitigated_date = f.get("mitigated").date()
-            diff = mitigated_date - start_date
-        else:
-            diff = timezone.now().date() - start_date
-        days = diff.days
+    if f.get("mitigated"):
+        mitigated_date = f.get("mitigated")
+        if isinstance(mitigated_date, datetime):
+            mitigated_date = f.get("mitigated").date()
+        diff = mitigated_date - start_date
+    else:
+        diff = timezone.now().date() - start_date
+    days = diff.days
     return max(0, days)
 
 
@@ -2666,9 +2622,11 @@ def generate_file_response(file_object: FileUpload) -> FileResponse:
         raise TypeError(msg)
     # Determine the path of the file on disk within the MEDIA_ROOT
     file_path = f"{settings.MEDIA_ROOT}/{file_object.file.url.lstrip(settings.MEDIA_URL)}"
+    # Clean the title by removing some problematic characters
+    cleaned_file_name = re.sub(r'[<>:"/\\|?*`=\'&%#;]', "-", file_object.title)
 
     return generate_file_response_from_file_path(
-        file_path, file_name=file_object.title, file_size=file_object.file.size,
+        file_path, file_name=cleaned_file_name, file_size=file_object.file.size,
     )
 
 
@@ -2697,3 +2655,20 @@ def generate_file_response_from_file_path(
     response["Content-Disposition"] = f'attachment; filename="{full_file_name}"'
     response["Content-Length"] = file_size
     return response
+
+
+def tag_validator(value: str | list[str], exception_class: Callable = ValidationError) -> None:
+    TAG_PATTERN = re.compile(r'[ ,\'"]')
+    error_messages = []
+
+    if isinstance(value, list):
+        error_messages.extend(f"Invalid tag: '{tag}'. Tags should not contain spaces, commas, or quotes." for tag in value if TAG_PATTERN.search(tag))
+    elif isinstance(value, str):
+        if TAG_PATTERN.search(value):
+            error_messages.append(f"Invalid tag: '{value}'. Tags should not contain spaces, commas, or quotes.")
+    else:
+        error_messages.append(f"Value must be a string or list of strings: {value} - {type(value)}.")
+
+    if error_messages:
+        logger.debug(f"Tag validation failed: {error_messages}")
+        raise exception_class(error_messages)

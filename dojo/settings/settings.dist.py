@@ -43,6 +43,7 @@ env = environ.FileAwareEnv(
     DD_SECURE_HSTS_SECONDS=(int, 31536000),  # One year expiration
     DD_SESSION_COOKIE_SECURE=(bool, False),
     DD_SESSION_EXPIRE_AT_BROWSER_CLOSE=(bool, False),
+    DD_SESSION_EXPIRE_WARNING=(int, 300),  # warning 5 mins before expiration
     DD_SESSION_COOKIE_AGE=(int, 1209600),  # 14 days
     DD_CSRF_COOKIE_SECURE=(bool, False),
     DD_CSRF_TRUSTED_ORIGINS=(list, []),
@@ -217,8 +218,6 @@ env = environ.FileAwareEnv(
     # finetuning settings for when enabled
     DD_SLA_NOTIFY_PRE_BREACH=(int, 3),
     DD_SLA_NOTIFY_POST_BREACH=(int, 7),
-    # Use business day's to calculate SLA's and age instead of calendar days
-    DD_SLA_BUSINESS_DAYS=(bool, False),
     # maximum number of result in search as search can be an expensive operation
     DD_SEARCH_MAX_RESULTS=(int, 100),
     DD_SIMILAR_FINDINGS_MAX_RESULTS=(int, 25),
@@ -654,7 +653,6 @@ SLA_NOTIFY_ACTIVE_VERIFIED_ONLY = env("DD_SLA_NOTIFY_ACTIVE_VERIFIED_ONLY")
 SLA_NOTIFY_WITH_JIRA_ONLY = env("DD_SLA_NOTIFY_WITH_JIRA_ONLY")  # Based on the 2 above, but only with a JIRA link
 SLA_NOTIFY_PRE_BREACH = env("DD_SLA_NOTIFY_PRE_BREACH")  # in days, notify between dayofbreach minus this number until dayofbreach
 SLA_NOTIFY_POST_BREACH = env("DD_SLA_NOTIFY_POST_BREACH")  # in days, skip notifications for findings that go past dayofbreach plus this number
-SLA_BUSINESS_DAYS = env("DD_SLA_BUSINESS_DAYS")  # Use business days to calculate SLA's and age of a finding instead of calendar days
 
 
 SEARCH_MAX_RESULTS = env("DD_SEARCH_MAX_RESULTS")
@@ -759,6 +757,7 @@ if env("DD_SECURE_HSTS_INCLUDE_SUBDOMAINS"):
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env("DD_SECURE_HSTS_INCLUDE_SUBDOMAINS")
 
 SESSION_EXPIRE_AT_BROWSER_CLOSE = env("DD_SESSION_EXPIRE_AT_BROWSER_CLOSE")
+SESSION_EXPIRE_WARNING = env("DD_SESSION_EXPIRE_WARNING")
 SESSION_COOKIE_AGE = env("DD_SESSION_COOKIE_AGE")
 
 # ------------------------------------------------------------------------------
@@ -861,6 +860,7 @@ TEMPLATES = [
                 "dojo.context_processors.bind_system_settings",
                 "dojo.context_processors.bind_alert_count",
                 "dojo.context_processors.bind_announcement",
+                "dojo.context_processors.session_expiry_notification",
             ],
         },
     },
@@ -1347,6 +1347,7 @@ HASHCODE_FIELDS_PER_SCANNER = {
     "KrakenD Audit Scan": ["description", "mitigation", "severity"],
     "Red Hat Satellite": ["description", "severity"],
     "Qualys Hacker Guardian Scan": ["title", "severity", "description"],
+    "Cyberwatch scan (Galeax)": ["title", "description", "severity"],
 }
 
 # Override the hardcoded settings here via the env var
@@ -1417,6 +1418,7 @@ HASHCODE_ALLOWS_NULL_CWE = {
     "Threagile risks report": True,
     "HCL AppScan on Cloud SAST XML": True,
     "AWS Inspector2 Scan": True,
+    "Cyberwatch scan (Galeax)": True,
 }
 
 # List of fields that are known to be usable in hash_code computation)
@@ -1598,6 +1600,7 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     "PTART Report": DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     "Red Hat Satellite": DEDUPE_ALGO_HASH_CODE,
     "Qualys Hacker Guardian Scan": DEDUPE_ALGO_HASH_CODE,
+    "Cyberwatch scan (Galeax)": DEDUPE_ALGO_HASH_CODE,
 }
 
 # Override the hardcoded settings here via the env var
@@ -1805,13 +1808,16 @@ DELETE_PREVIEW = env("DD_DELETE_PREVIEW")
 SILENCED_SYSTEM_CHECKS = ["django_jsonfield_backport.W001"]
 
 VULNERABILITY_URLS = {
+    "ALAS": "https://alas.aws.amazon.com/AL2/&&.html",  # e.g. https://alas.aws.amazon.com/alas2.html
     "ALBA-": "https://osv.dev/vulnerability/",  # e.g. https://osv.dev/vulnerability/ALBA-2019:3411
+    "ALINUX2-SA-": "https://mirrors.aliyun.com/alinux/cve/",  # e.g. https://mirrors.aliyun.com/alinux/cve/alinux2-sa-20250007.xml
     "ALSA-": "https://osv.dev/vulnerability/",  # e.g. https://osv.dev/vulnerability/ALSA-2024:0827
     "ASA-": "https://security.archlinux.org/",  # e.g. https://security.archlinux.org/ASA-202003-8
     "AVD": "https://avd.aquasec.com/misconfig/",  # e.g. https://avd.aquasec.com/misconfig/avd-ksv-01010
     "BAM-": "https://jira.atlassian.com/browse/",  # e.g. https://jira.atlassian.com/browse/BAM-25498
     "BSERV-": "https://jira.atlassian.com/browse/",  # e.g. https://jira.atlassian.com/browse/BSERV-19020
     "C-": "https://hub.armosec.io/docs/",  # e.g. https://hub.armosec.io/docs/c-0085
+    "CISCO-SA-": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/",  # e.g. https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-umbrella-tunnel-gJw5thgE
     "CAPEC": "https://capec.mitre.org/data/definitions/&&.html",  # e.g. https://capec.mitre.org/data/definitions/157.html
     "CGA-": "https://images.chainguard.dev/security/",  # e.g. https://images.chainguard.dev/security/CGA-24pq-h5fw-43v3
     "CONFSERVER-": "https://jira.atlassian.com/browse/",  # e.g. https://jira.atlassian.com/browse/CONFSERVER-93361
@@ -1827,9 +1833,11 @@ VULNERABILITY_URLS = {
     "GHSA-": "https://github.com/advisories/",  # e.g. https://github.com/advisories/GHSA-58vj-cv5w-v4v6
     "GLSA": "https://security.gentoo.org/",  # e.g. https://security.gentoo.org/glsa/202409-32
     "JSDSERVER-": "https://jira.atlassian.com/browse/",  # e.g. https://jira.atlassian.com/browse/JSDSERVER-14872
+    "KB": "https://support.hcl-software.com/csm?id=kb_article&sysparm_article=",  # e.g. https://support.hcl-software.com/csm?id=kb_article&sysparm_article=KB0108401
     "KHV": "https://avd.aquasec.com/misconfig/kubernetes/",  # e.g. https://avd.aquasec.com/misconfig/kubernetes/khv045
     "MGAA-": "https://advisories.mageia.org/&&.html",  # e.g. https://advisories.mageia.org/MGAA-2013-0054.html
     "MGASA-": "https://advisories.mageia.org/&&.html",  # e.g. https://advisories.mageia.org/MGASA-2025-0023.html
+    "NTAP-": "https://security.netapp.com/advisory/",  # e.g. https://security.netapp.com/advisory/ntap-20250328-0007
     "OPENSUSE-SU-": "https://osv.dev/vulnerability/",  # e.g. https://osv.dev/vulnerability/openSUSE-SU-2025:14898-1
     "OSV-": "https://osv.dev/vulnerability/",  # e.g. https://osv.dev/vulnerability/OSV-2024-1330
     "PAN-SA-": "https://security.paloaltonetworks.com/",  # e.g. https://security.paloaltonetworks.com/PAN-SA-2024-0010
